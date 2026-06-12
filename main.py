@@ -1,0 +1,368 @@
+"""
+Flight Finder Agent — GreenNode AgentBase
+Helps users find the most suitable flights based on natural language requirements.
+Framework: LangGraph + AgentBase Memory (short-term + long-term)
+"""
+
+import os
+from datetime import datetime, date
+from typing import Annotated, Optional, TypedDict
+
+from dotenv import load_dotenv
+from langchain_core.messages import SystemMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.config import get_config
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+
+from greennode_agentbase import (
+    GreenNodeAgentBaseApp,
+    PingStatus,
+    RequestContext,
+)
+from greennode_agentbase.memory import MemoryClient
+from greennode_agentbase.memory.models import MemoryRecordSearchRequest
+from greennode_agent_bridge import AgentBaseMemoryEvents
+
+from tools.flight_providers import (
+    AIRPORT_NAMES,
+    get_provider,
+    resolve_airport,
+)
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+MEMORY_ID = os.environ.get("MEMORY_ID", "")
+MEMORY_STRATEGY_ID = os.environ.get("MEMORY_STRATEGY_ID", "default")
+
+LLM_MODEL = os.environ.get("LLM_MODEL", "")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+
+_missing_vars = [v for v, val in [
+    ("LLM_MODEL", LLM_MODEL),
+    ("LLM_BASE_URL", LLM_BASE_URL),
+    ("LLM_API_KEY", LLM_API_KEY),
+] if not val]
+if _missing_vars:
+    raise ValueError(
+        f"Missing required env vars: {', '.join(_missing_vars)}. "
+        "Set them in .env or use /agentbase-llm to get a GreenNode AIP key."
+    )
+
+if MEMORY_ID:
+    checkpointer = AgentBaseMemoryEvents(memory_id=MEMORY_ID)
+    memory_client = MemoryClient()
+else:
+    checkpointer = None
+    memory_client = None
+
+llm = ChatOpenAI(
+    model=LLM_MODEL,
+    base_url=LLM_BASE_URL,
+    api_key=LLM_API_KEY,
+)
+
+flight_provider = get_provider()
+
+app = GreenNodeAgentBaseApp()
+
+# ---------------------------------------------------------------------------
+# System Prompt
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """Bạn là trợ lý tìm vé máy bay thông minh. Nhiệm vụ của bạn là:
+1. Hỏi thêm thông tin còn thiếu (điểm đi, điểm đến, ngày bay, số hành khách, hạng ghế, ngân sách) trước khi tìm kiếm.
+2. Tìm kiếm chuyến bay phù hợp nhất với yêu cầu.
+3. Gợi ý top 3–5 chuyến bay kèm giải thích rõ ràng tại sao phù hợp.
+4. Ghi nhớ sở thích của người dùng (hãng bay yêu thích, hạng ghế, v.v.) để cá nhân hóa các lần tìm kiếm sau.
+5. Trả lời bằng ngôn ngữ người dùng sử dụng (tiếng Việt hoặc tiếng Anh).
+
+Quy tắc:
+- Luôn gọi `recall_preferences` đầu tiên để kiểm tra sở thích đã lưu.
+- Khi tìm thấy chuyến bay, trình bày rõ ràng: hãng, số hiệu, giờ bay, thời gian bay, số điểm dừng và giá.
+- Với hành lý, suất ăn hoặc số ghế, phải nói rõ "không có dữ liệu" nếu provider không trả về.
+- Nếu không có chuyến bay nào phù hợp ngân sách, thông báo và đề xuất thay đổi tiêu chí.
+- Không bịa đặt thông tin chuyến bay — chỉ dùng dữ liệu từ tool search_flights.
+- Ngày hôm nay: {today}
+"""
+
+# ---------------------------------------------------------------------------
+# Helper: actor_id and namespace
+# ---------------------------------------------------------------------------
+
+
+def _get_actor_id() -> str:
+    config = get_config()
+    return config["configurable"].get("actor_id", "anonymous")
+
+
+def _namespace() -> str:
+    return f"/strategies/{MEMORY_STRATEGY_ID}/actors/{_get_actor_id()}"
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+
+@tool
+def search_flights(
+    origin: str,
+    destination: str,
+    departure_date: str,
+    passengers: int = 1,
+    cabin_class: str = "ECONOMY",
+    max_budget_usd: Optional[float] = None,
+    return_date: Optional[str] = None,
+) -> str:
+    """Search for available flights matching the user's criteria.
+
+    Args:
+        origin: Departure city name or IATA code (e.g. "Hà Nội", "HAN", "Hanoi").
+        destination: Arrival city name or IATA code (e.g. "Đà Nẵng", "DAD").
+        departure_date: Departure date in YYYY-MM-DD format.
+        passengers: Number of passengers (default 1).
+        cabin_class: Seat class — ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST (default ECONOMY).
+        max_budget_usd: Maximum total price in USD (optional).
+        return_date: Return date in YYYY-MM-DD format for round trips (optional).
+
+    Returns:
+        Formatted list of available flights sorted by price.
+    """
+    try:
+        offers = flight_provider.search(
+            origin=origin,
+            destination=destination,
+            departure_date=departure_date,
+            passengers=passengers,
+            cabin_class=cabin_class,
+            max_price_usd=max_budget_usd,
+            return_date=return_date,
+        )
+    except Exception as exc:
+        return f"Lỗi khi tìm kiếm chuyến bay: {exc}"
+
+    if not offers:
+        return (
+            f"Không tìm thấy chuyến bay từ {origin} đến {destination} ngày {departure_date} "
+            f"trong hạng {cabin_class}"
+            + (f" với ngân sách ≤ ${max_budget_usd}" if max_budget_usd else "")
+            + "."
+        )
+
+    origin_label = AIRPORT_NAMES.get(resolve_airport(origin) or "", origin)
+    dest_label = AIRPORT_NAMES.get(resolve_airport(destination) or "", destination)
+
+    lines = [
+        f"Tìm thấy {len(offers)} chuyến bay từ {origin_label} → {dest_label} "
+        f"ngày {departure_date} (hạng {cabin_class}, {passengers} HK):\n"
+    ]
+    for i, f in enumerate(offers[:5], 1):
+        if f.stops == 0:
+            stops_label = "Bay thẳng"
+        elif f.stop_cities:
+            stops_label = f"{f.stops} điểm dừng ({', '.join(f.stop_cities)})"
+        else:
+            stops_label = f"{f.stops} điểm dừng"
+        baggage_label = (
+            f"{f.baggage_allowance_kg}kg"
+            if f.baggage_allowance_kg is not None
+            else "Không có dữ liệu hành lý"
+        )
+        meal_label = (
+            "Có suất ăn"
+            if f.meal_included is True
+            else "Không có suất ăn"
+            if f.meal_included is False
+            else "Không có dữ liệu suất ăn"
+        )
+        seats_label = (
+            f"Còn {f.seats_available} ghế"
+            if f.seats_available is not None
+            else "Không có dữ liệu số ghế"
+        )
+        lines.append(
+            f"{i}. [{f.flight_id}] {f.airline} {f.flight_number}\n"
+            f"   ✈ {f.departure_time} → {f.arrival_time} ({f.duration_minutes//60}h{f.duration_minutes%60:02d}m, {stops_label})\n"
+            f"   💺 {f.cabin_class} | 🧳 {baggage_label} | {meal_label}\n"
+            f"   💰 ${f.price_usd:,.2f} (~{f.price_vnd:,}đ) | {seats_label}\n"
+        )
+
+    return "\n".join(lines)
+
+
+@tool
+def get_flight_details(flight_id: str) -> str:
+    """Get additional details for a specific flight offer.
+
+    Args:
+        flight_id: The flight_id returned by search_flights.
+
+    Returns:
+        Detailed itinerary information available from SerpAPI/Google Flights.
+    """
+    details = flight_provider.get_details(flight_id)
+    if not details:
+        return f"Không tìm thấy thông tin chi tiết cho chuyến bay {flight_id}."
+    lines = [f"Chi tiết chuyến bay {flight_id}:"]
+    for k, v in details.items():
+        if k != "flight_id":
+            if isinstance(v, list):
+                v = "; ".join(str(item) for item in v)
+            lines.append(f"  • {k}: {v}")
+    return "\n".join(lines)
+
+
+@tool
+def list_supported_airports() -> str:
+    """List all supported airport codes and city names.
+
+    Returns:
+        A formatted list of IATA codes and city names.
+    """
+    lines = ["Các sân bay được hỗ trợ:\n"]
+    for code, city in AIRPORT_NAMES.items():
+        lines.append(f"  {code} — {city}")
+    return "\n".join(lines)
+
+
+@tool
+def remember_preference(fact: str) -> str:
+    """Store a user preference or important fact in long-term memory.
+
+    Use this when the user mentions preferences like favorite airline, seat class,
+    meal preference, baggage needs, or loyalty program membership.
+
+    Args:
+        fact: The preference or fact to remember (e.g. "Thích bay Vietnam Airlines hạng Business").
+    """
+    if not memory_client:
+        return "Memory chưa được cấu hình (MEMORY_ID chưa được set)."
+    memory_client.insert_memory_records_directly(
+        id=MEMORY_ID,
+        namespace=_namespace(),
+        request=[fact],
+    )
+    return f"Đã ghi nhớ: {fact}"
+
+
+@tool
+def recall_preferences(query: str) -> str:
+    """Search long-term memory for user preferences relevant to the current query.
+
+    Always call this at the start of a flight search to personalize results.
+
+    Args:
+        query: What to search for, e.g. "hãng bay ưa thích" or "preferred airline".
+    """
+    if not memory_client:
+        return "Chưa có sở thích nào được lưu (MEMORY_ID chưa được set)."
+    results = memory_client.search_memory_records(
+        id=MEMORY_ID,
+        namespace=_namespace(),
+        request=MemoryRecordSearchRequest(query=query, limit=10),
+    )
+    if not results:
+        return "Chưa có sở thích nào được lưu."
+    return "Sở thích đã lưu:\n" + "\n".join(
+        f"  - {r.memory} (score: {r.score:.2f})" for r in results
+    )
+
+
+# ---------------------------------------------------------------------------
+# LangGraph Definition
+# ---------------------------------------------------------------------------
+
+ALL_TOOLS = [
+    search_flights,
+    get_flight_details,
+    list_supported_airports,
+    remember_preference,
+    recall_preferences,
+]
+
+llm_with_tools = llm.bind_tools(ALL_TOOLS)
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+def chatbot(state: State) -> dict:
+    system = SystemMessage(content=SYSTEM_PROMPT.format(today=date.today().isoformat()))
+    messages = [system] + state["messages"]
+    return {"messages": [llm_with_tools.invoke(messages)]}
+
+
+graph_builder = StateGraph(State)
+graph_builder.add_node("chatbot", chatbot)
+graph_builder.add_node("tools", ToolNode(ALL_TOOLS))
+graph_builder.add_edge(START, "chatbot")
+graph_builder.add_conditional_edges("chatbot", tools_condition)
+graph_builder.add_edge("tools", "chatbot")
+
+graph = graph_builder.compile(checkpointer=checkpointer)
+
+# ---------------------------------------------------------------------------
+# AgentBase Handler
+# ---------------------------------------------------------------------------
+
+
+@app.entrypoint
+def handler(payload: dict, context: RequestContext) -> dict:
+    """Flight Finder agent entrypoint.
+
+    Request body:
+        {"message": "Tìm vé từ Hà Nội đi Đà Nẵng ngày 20/7 cho 2 người"}
+
+    Headers (required when MEMORY_ID is set):
+        X-GreenNode-AgentBase-User-Id: <user_id>
+        X-GreenNode-AgentBase-Session-Id: <session_id>
+    """
+    if MEMORY_ID and (not context.user_id or not context.session_id):
+        return {
+            "status": "error",
+            "error": (
+                "Memory mode requires X-GreenNode-AgentBase-User-Id "
+                "and X-GreenNode-AgentBase-Session-Id headers."
+            ),
+        }
+
+    message = payload.get("message", "")
+    if not message:
+        return {"status": "error", "error": "Missing 'message' field in request body."}
+
+    config = {
+        "configurable": {
+            "thread_id": context.session_id or "default-session",
+            "actor_id": context.user_id or "anonymous",
+        }
+    }
+
+    try:
+        result = graph.invoke({"messages": [("user", message)]}, config)
+        ai_message = result["messages"][-1]
+        return {
+            "status": "success",
+            "response": ai_message.content,
+            "session_id": context.session_id,
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@app.ping
+def health_check() -> PingStatus:
+    return PingStatus.HEALTHY
+
+
+if __name__ == "__main__":
+    app.run(port=8080, host="0.0.0.0")
