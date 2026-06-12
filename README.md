@@ -15,6 +15,7 @@ Agent hiểu yêu cầu bằng tiếng Việt và tiếng Anh, tìm kiếm và g
 - **Đa ngôn ngữ**: tự động phát hiện tiếng Việt / tiếng Anh
 - **Dữ liệu Google Flights qua SerpAPI**: hỗ trợ chuyến bay thật, một chiều và khứ hồi
 - **Mock provider**: chạy test không cần API key
+- **Zalo Bot**: nhận yêu cầu qua webhook và trả kết quả bằng `sendMessage`
 
 ---
 
@@ -77,6 +78,12 @@ FLIGHT_API_PROVIDER=serpapi
 SERPAPI_API_KEY=your-serpapi-key
 SERPAPI_GL=vn
 SERPAPI_HL=vi
+
+# Zalo Bot (tuỳ chọn)
+ZALO_BOT_TOKEN=your-zalo-bot-token
+ZALO_WEBHOOK_SECRET_TOKEN=your-random-secret-token
+ZALO_PARSE_MODE=markdown
+ZALO_REQUEST_TIMEOUT_SECONDS=15
 ```
 
 ### Sử dụng SerpAPI Google Flights
@@ -149,6 +156,87 @@ curl http://127.0.0.1:8080/health
 
 ---
 
+## Tích hợp Zalo Bot
+
+Agent cung cấp webhook:
+
+```text
+POST /webhooks/zalo
+```
+
+Luồng xử lý:
+
+1. Zalo gửi event `message.text.received` đến webhook.
+2. Agent xác thực header `X-Bot-Api-Secret-Token`.
+3. `message.from.id` được dùng làm user ID và `message.chat.id` làm session ID.
+4. Agent xử lý yêu cầu, sau đó gọi API `sendMessage` để phản hồi vào đúng cuộc trò chuyện.
+5. Câu trả lời dài hơn 2.000 ký tự được tự động chia thành nhiều tin nhắn.
+
+### 1. Cấu hình biến môi trường
+
+```env
+ZALO_BOT_TOKEN=12345689:abc-xyz
+ZALO_WEBHOOK_SECRET_TOKEN=replace-with-a-random-secret-at-least-8-characters
+ZALO_PARSE_MODE=markdown
+ZALO_REQUEST_TIMEOUT_SECONDS=15
+```
+
+`ZALO_WEBHOOK_SECRET_TOKEN` phải trùng với `secret_token` dùng khi gọi API `setWebhook`.
+Không commit bot token hoặc secret token vào Git.
+
+### 2. Public webhook bằng HTTPS
+
+Zalo yêu cầu webhook URL sử dụng HTTPS. Sau khi deploy, URL sẽ có dạng:
+
+```text
+https://your-domain.example/webhooks/zalo
+```
+
+Khi phát triển local, có thể expose cổng `8080` bằng một HTTPS tunnel rồi dùng URL
+tunnel tương ứng.
+
+### 3. Đăng ký webhook với Zalo
+
+```bash
+export ZALO_BOT_TOKEN='12345689:abc-xyz'
+export ZALO_WEBHOOK_SECRET_TOKEN='replace-with-a-random-secret-at-least-8-characters'
+export PUBLIC_WEBHOOK_URL='https://your-domain.example/webhooks/zalo'
+
+curl -X POST \
+  "https://bot-api.zaloplatforms.com/bot${ZALO_BOT_TOKEN}/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"url\": \"${PUBLIC_WEBHOOK_URL}\",
+    \"secret_token\": \"${ZALO_WEBHOOK_SECRET_TOKEN}\"
+  }"
+```
+
+### 4. Test webhook local
+
+```bash
+curl -X POST http://127.0.0.1:8080/webhooks/zalo \
+  -H "Content-Type: application/json" \
+  -H "X-Bot-Api-Secret-Token: ${ZALO_WEBHOOK_SECRET_TOKEN}" \
+  -d '{
+    "ok": true,
+    "result": {
+      "event_name": "message.text.received",
+      "message": {
+        "from": {"id": "user-001", "display_name": "Test", "is_bot": false},
+        "chat": {"id": "chat-001", "chat_type": "PRIVATE"},
+        "text": "Tìm vé từ Hà Nội đi Đà Nẵng ngày 2026-07-20 cho 2 người",
+        "message_id": "message-001",
+        "date": 1784512800000
+      }
+    }
+  }'
+```
+
+Webhook trả `{"ok": true}` ngay sau khi nhận event. Agent tiếp tục xử lý và gửi kết quả
+qua Zalo Bot API ở background.
+
+---
+
 ## Cấu trúc dự án
 
 ```
@@ -157,6 +245,9 @@ flight-finder-agent/
 ├── tools/
 │   ├── __init__.py
 │   └── flight_providers.py         # SerpAPI + Mock providers
+├── integrations/
+│   ├── __init__.py
+│   └── zalo_bot.py                 # Zalo webhook + sendMessage client
 ├── docs/specs/                     # Spec-Driven Development specs
 │   ├── mission.md                  # Project mission & goals
 │   ├── tech-stack.md               # Technology decisions
@@ -167,6 +258,9 @@ flight-finder-agent/
 │       └── validation.md           # Acceptance criteria
 ├── Dockerfile
 ├── requirements.txt
+├── tests/
+│   ├── test_flight_providers.py
+│   └── test_zalo_bot.py
 ├── .env.example
 ├── .greennode.json
 ├── .gitignore

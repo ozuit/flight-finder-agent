@@ -26,6 +26,7 @@ from greennode_agentbase.memory import MemoryClient
 from greennode_agentbase.memory.models import MemoryRecordSearchRequest
 from greennode_agent_bridge import AgentBaseMemoryEvents
 
+from integrations.zalo_bot import ZaloBotClient, ZaloWebhookHandler
 from tools.flight_providers import (
     AIRPORT_NAMES,
     get_provider,
@@ -44,6 +45,13 @@ MEMORY_STRATEGY_ID = os.environ.get("MEMORY_STRATEGY_ID", "default")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+
+ZALO_BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "")
+ZALO_WEBHOOK_SECRET_TOKEN = os.environ.get("ZALO_WEBHOOK_SECRET_TOKEN", "")
+ZALO_PARSE_MODE = os.environ.get("ZALO_PARSE_MODE", "markdown").strip() or None
+ZALO_REQUEST_TIMEOUT_SECONDS = float(
+    os.environ.get("ZALO_REQUEST_TIMEOUT_SECONDS", "15")
+)
 
 _missing_vars = [v for v, val in [
     ("LLM_MODEL", LLM_MODEL),
@@ -315,6 +323,34 @@ graph = graph_builder.compile(checkpointer=checkpointer)
 # ---------------------------------------------------------------------------
 
 
+def invoke_flight_agent(message: str, user_id: str, session_id: str) -> str:
+    """Run one conversational turn and return the assistant's text response."""
+    if MEMORY_ID and (not user_id or not session_id):
+        raise ValueError("Memory mode requires both user_id and session_id.")
+
+    config = {
+        "configurable": {
+            "thread_id": session_id or "default-session",
+            "actor_id": user_id or "anonymous",
+        }
+    }
+    result = graph.invoke({"messages": [("user", message)]}, config)
+    ai_message = result["messages"][-1]
+    content = ai_message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_blocks = []
+        for block in content:
+            if isinstance(block, str):
+                text_blocks.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                text_blocks.append(block["text"])
+        if text_blocks:
+            return "\n".join(text_blocks)
+    return str(content)
+
+
 @app.entrypoint
 def handler(payload: dict, context: RequestContext) -> dict:
     """Flight Finder agent entrypoint.
@@ -339,19 +375,14 @@ def handler(payload: dict, context: RequestContext) -> dict:
     if not message:
         return {"status": "error", "error": "Missing 'message' field in request body."}
 
-    config = {
-        "configurable": {
-            "thread_id": context.session_id or "default-session",
-            "actor_id": context.user_id or "anonymous",
-        }
-    }
-
     try:
-        result = graph.invoke({"messages": [("user", message)]}, config)
-        ai_message = result["messages"][-1]
         return {
             "status": "success",
-            "response": ai_message.content,
+            "response": invoke_flight_agent(
+                message,
+                context.user_id or "anonymous",
+                context.session_id or "default-session",
+            ),
             "session_id": context.session_id,
             "timestamp": datetime.now().isoformat(),
         }
@@ -362,6 +393,23 @@ def handler(payload: dict, context: RequestContext) -> dict:
 @app.ping
 def health_check() -> PingStatus:
     return PingStatus.HEALTHY
+
+
+zalo_bot_client = (
+    ZaloBotClient(
+        ZALO_BOT_TOKEN,
+        parse_mode=ZALO_PARSE_MODE,
+        timeout_seconds=ZALO_REQUEST_TIMEOUT_SECONDS,
+    )
+    if ZALO_BOT_TOKEN
+    else None
+)
+zalo_webhook_handler = ZaloWebhookHandler(
+    secret_token=ZALO_WEBHOOK_SECRET_TOKEN,
+    agent_runner=invoke_flight_agent,
+    bot_client=zalo_bot_client,
+)
+app.add_route("/webhooks/zalo", zalo_webhook_handler.handle, methods=["POST"])
 
 
 if __name__ == "__main__":
