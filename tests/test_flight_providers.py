@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from tools.flight_providers import SerpApiFlightProvider, get_provider
+from tools.flight_providers import MOCK_AIRLINES, SerpApiFlightProvider, get_provider
 
 
 class FakeResponse:
@@ -172,6 +172,28 @@ class SerpApiFlightProviderTest(unittest.TestCase):
             provider = get_provider()
 
         self.assertIsInstance(provider, SerpApiFlightProvider)
+
+
+class MockAirlinesTest(unittest.TestCase):
+    def test_mock_airlines_contains_expected_entries(self):
+        names = [name for name, _ in MOCK_AIRLINES]
+        codes = [code for _, code in MOCK_AIRLINES]
+
+        self.assertIn("Vietnam Airlines", names)
+        self.assertIn("VietJet Air", names)
+        self.assertIn("VN", codes)
+        self.assertIn("VJ", codes)
+
+    def test_mock_airlines_has_no_duplicate_codes(self):
+        codes = [code for _, code in MOCK_AIRLINES]
+        self.assertEqual(len(codes), len(set(codes)))
+
+    def test_mock_airlines_entries_are_non_empty_strings(self):
+        for airline_name, code in MOCK_AIRLINES:
+            self.assertIsInstance(airline_name, str)
+            self.assertIsInstance(code, str)
+            self.assertTrue(airline_name.strip())
+            self.assertTrue(code.strip())
 
 
 if __name__ == "__main__":

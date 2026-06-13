@@ -30,6 +30,7 @@ from greennode_agent_bridge import AgentBaseMemoryEvents
 from integrations.zalo_bot import ZaloBotClient, ZaloWebhookHandler
 from tools.flight_providers import (
     AIRPORT_NAMES,
+    MOCK_AIRLINES,
     get_provider,
     resolve_airport,
 )
@@ -174,11 +175,17 @@ def validate_flight_request(
 
     origin_code = resolve_airport(origin)
     if not origin_code:
-        return f"Không nhận ra điểm đi '{origin}'. Gọi list_supported_airports rồi hỏi người dùng chọn lại."
+        return (
+            f"Không nhận ra điểm đi '{origin}'. "
+            "Gọi list_supported_airports rồi hỏi người dùng chọn lại."
+        )
 
     dest_code = resolve_airport(destination)
     if not dest_code:
-        return f"Không nhận ra điểm đến '{destination}'. Gọi list_supported_airports rồi hỏi người dùng chọn lại."
+        return (
+            f"Không nhận ra điểm đến '{destination}'. "
+            "Gọi list_supported_airports rồi hỏi người dùng chọn lại."
+        )
 
     return (
         f"Hợp lệ: {origin_code} → {dest_code}, ngày {departure_date}, "
@@ -349,6 +356,19 @@ def list_supported_airports() -> str:
 
 
 @tool
+def list_supported_airlines() -> str:
+    """List all airlines supported by the flight search system with their IATA codes.
+
+    Returns:
+        A formatted list of airline names and their two-letter IATA codes.
+    """
+    lines = ["Các hãng bay được hỗ trợ:\n"]
+    for airline_name, code in MOCK_AIRLINES:
+        lines.append(f"  {code} — {airline_name}")
+    return "\n".join(lines)
+
+
+@tool
 def remember_preference(fact: str) -> str:
     """Store a user preference or important fact in long-term memory.
 
@@ -497,6 +517,7 @@ ALL_TOOLS = [
     search_flights,
     get_flight_details,
     list_supported_airports,
+    list_supported_airlines,
     remember_preference,
     recall_preferences,
     track_flight,
