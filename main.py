@@ -4,6 +4,7 @@ Helps users find the most suitable flights based on natural language requirement
 Framework: LangGraph + AgentBase Memory (short-term + long-term)
 """
 
+import hmac
 import os
 from datetime import datetime, date
 from typing import Annotated, Optional, TypedDict
@@ -32,6 +33,7 @@ from tools.flight_providers import (
     get_provider,
     resolve_airport,
 )
+from tools.flight_tracker import FlightTracker
 
 load_dotenv()
 
@@ -78,6 +80,7 @@ llm = ChatOpenAI(
 )
 
 flight_provider = get_provider()
+flight_tracker = FlightTracker()
 
 app = GreenNodeAgentBaseApp()
 
@@ -86,18 +89,31 @@ app = GreenNodeAgentBaseApp()
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """Bạn là trợ lý tìm vé máy bay thông minh. Nhiệm vụ của bạn là:
-1. Hỏi thêm thông tin còn thiếu (điểm đi, điểm đến, ngày bay, số hành khách, hạng ghế, ngân sách) trước khi tìm kiếm.
-2. Tìm kiếm chuyến bay phù hợp nhất với yêu cầu.
-3. Gợi ý top 3–5 chuyến bay kèm giải thích rõ ràng tại sao phù hợp.
-4. Ghi nhớ sở thích của người dùng (hãng bay yêu thích, hạng ghế, v.v.) để cá nhân hóa các lần tìm kiếm sau.
+1. Thu thập đủ thông tin cần thiết trước khi tìm kiếm — hỏi TỪNG CÁI MỘT nếu thiếu.
+2. Tìm kiếm chuyến bay phù hợp và gợi ý top 3–5 kèm giải thích tại sao phù hợp.
+3. Ghi nhớ và áp dụng sở thích của người dùng để cá nhân hóa kết quả.
+4. Hỗ trợ theo dõi giá vé và thông báo khi có thay đổi.
 5. Trả lời bằng ngôn ngữ người dùng sử dụng (tiếng Việt hoặc tiếng Anh).
 
+Quy trình xử lý:
+1. Gọi `recall_preferences` để kiểm tra sở thích đã lưu (hãng bay, hạng ghế, ngân sách...).
+2. Gọi `validate_flight_request` với thông tin hiện có để xác định còn thiếu gì.
+3. Nếu thiếu thông tin, hỏi người dùng TỪNG cái một (ưu tiên: điểm đi → điểm đến → ngày → hành khách).
+4. Khi đủ thông tin, gọi `search_flights` (áp dụng sở thích đã lưu vào tham số).
+5. Trình bày kết quả: xếp hạng top 3–5, GIẢI THÍCH từng lựa chọn (rẻ nhất / nhanh nhất / bay thẳng / phù hợp sở thích...).
+6. Khi người dùng muốn theo dõi một chuyến bay: gọi `track_flight` với thông tin chuyến bay đó.
+   - Nếu người dùng đang chat qua Zalo, dùng `chat_id` từ session_id (bỏ tiền tố "zalo:").
+   - Nếu không xác định được chat_id, dùng user_id làm chat_id.
+7. Khi người dùng muốn xem danh sách đang theo dõi: gọi `list_tracked_flights`.
+8. Khi người dùng muốn huỷ theo dõi: gọi `untrack_flight` với tracking_id.
+
 Quy tắc:
-- Luôn gọi `recall_preferences` đầu tiên để kiểm tra sở thích đã lưu.
-- Khi tìm thấy chuyến bay, trình bày rõ ràng: hãng, số hiệu, giờ bay, thời gian bay, số điểm dừng và giá.
-- Với hành lý, suất ăn hoặc số ghế, phải nói rõ "không có dữ liệu" nếu provider không trả về.
-- Nếu không có chuyến bay nào phù hợp ngân sách, thông báo và đề xuất thay đổi tiêu chí.
-- Không bịa đặt thông tin chuyến bay — chỉ dùng dữ liệu từ tool search_flights.
+- KHÔNG tìm kiếm khi chưa có điểm đi, điểm đến và ngày bay.
+- Hỏi từng câu ngắn gọn, không hỏi nhiều thứ cùng lúc.
+- Với hành lý, suất ăn hoặc số ghế: nói rõ "không có dữ liệu" nếu provider không trả về.
+- Nếu không có chuyến bay phù hợp ngân sách: thông báo và đề xuất thay đổi tiêu chí.
+- Khi người dùng đề cập sở thích (hãng, hạng ghế, bữa ăn, hành lý...), gọi `remember_preference`.
+- KHÔNG bịa đặt thông tin — chỉ dùng dữ liệu thực từ `search_flights`.
 - Ngày hôm nay: {today}
 """
 
@@ -121,6 +137,56 @@ def _namespace() -> str:
 
 
 @tool
+def validate_flight_request(
+    origin: Optional[str] = None,
+    destination: Optional[str] = None,
+    departure_date: Optional[str] = None,
+    passengers: Optional[int] = None,
+    cabin_class: Optional[str] = None,
+) -> str:
+    """Check if all required information is present before calling search_flights.
+
+    Call this after collecting user input to verify what's still missing.
+    Returns either a list of missing fields to ask for, or confirms readiness to search.
+
+    Args:
+        origin: Departure city or IATA code provided by user so far (or None if not yet given).
+        destination: Arrival city or IATA code provided by user so far (or None if not yet given).
+        departure_date: Date in YYYY-MM-DD format (or None if not yet given).
+        passengers: Number of passengers (or None if not yet given).
+        cabin_class: ECONOMY/PREMIUM_ECONOMY/BUSINESS/FIRST (or None if not yet given).
+    """
+    missing = []
+    if not origin:
+        missing.append("điểm khởi hành (VD: Hà Nội, Đà Nẵng, HAN)")
+    if not destination:
+        missing.append("điểm đến")
+    if not departure_date:
+        missing.append("ngày bay (định dạng YYYY-MM-DD)")
+
+    if missing:
+        return "Còn thiếu thông tin: " + "; ".join(missing) + ". Hãy hỏi người dùng từng thông tin một."
+
+    try:
+        datetime.strptime(departure_date, "%Y-%m-%d")
+    except ValueError:
+        return f"Ngày '{departure_date}' không đúng định dạng YYYY-MM-DD. Hãy hỏi lại ngày bay."
+
+    origin_code = resolve_airport(origin)
+    if not origin_code:
+        return f"Không nhận ra điểm đi '{origin}'. Gọi list_supported_airports rồi hỏi người dùng chọn lại."
+
+    dest_code = resolve_airport(destination)
+    if not dest_code:
+        return f"Không nhận ra điểm đến '{destination}'. Gọi list_supported_airports rồi hỏi người dùng chọn lại."
+
+    return (
+        f"Hợp lệ: {origin_code} → {dest_code}, ngày {departure_date}, "
+        f"{passengers or 1} hành khách, hạng {cabin_class or 'ECONOMY'}. Sẵn sàng tìm kiếm."
+    )
+
+
+@tool
 def search_flights(
     origin: str,
     destination: str,
@@ -129,6 +195,10 @@ def search_flights(
     cabin_class: str = "ECONOMY",
     max_budget_usd: Optional[float] = None,
     return_date: Optional[str] = None,
+    max_stops: Optional[int] = None,
+    preferred_airline: Optional[str] = None,
+    earliest_departure: Optional[str] = None,
+    latest_departure: Optional[str] = None,
 ) -> str:
     """Search for available flights matching the user's criteria.
 
@@ -140,9 +210,13 @@ def search_flights(
         cabin_class: Seat class — ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST (default ECONOMY).
         max_budget_usd: Maximum total price in USD (optional).
         return_date: Return date in YYYY-MM-DD format for round trips (optional).
+        max_stops: Maximum number of layovers (0 = direct only, 1 = max 1 stop, etc.).
+        preferred_airline: Preferred airline name — matching results shown first (e.g. "Vietnam Airlines").
+        earliest_departure: Earliest acceptable departure time in HH:MM format (e.g. "06:00").
+        latest_departure: Latest acceptable departure time in HH:MM format (e.g. "20:00").
 
     Returns:
-        Formatted list of available flights sorted by price.
+        Formatted list of available flights sorted by price with match explanations.
     """
     try:
         offers = flight_provider.search(
@@ -157,6 +231,22 @@ def search_flights(
     except Exception as exc:
         return f"Lỗi khi tìm kiếm chuyến bay: {exc}"
 
+    # Apply advanced filters
+    if max_stops is not None:
+        offers = [o for o in offers if o.stops <= max_stops]
+
+    if earliest_departure:
+        offers = [o for o in offers if o.departure_time[:5] >= earliest_departure]
+
+    if latest_departure:
+        offers = [o for o in offers if o.departure_time[:5] <= latest_departure]
+
+    if preferred_airline:
+        airline_lower = preferred_airline.lower()
+        preferred = [o for o in offers if airline_lower in o.airline.lower()]
+        others = [o for o in offers if airline_lower not in o.airline.lower()]
+        offers = preferred + others
+
     if not offers:
         return (
             f"Không tìm thấy chuyến bay từ {origin} đến {destination} ngày {departure_date} "
@@ -168,11 +258,16 @@ def search_flights(
     origin_label = AIRPORT_NAMES.get(resolve_airport(origin) or "", origin)
     dest_label = AIRPORT_NAMES.get(resolve_airport(destination) or "", destination)
 
+    top = offers[:5]
+    cheapest_id = min(top, key=lambda o: o.price_usd).flight_id
+    fastest_id = min(top, key=lambda o: o.duration_minutes).flight_id
+    direct_ids = {o.flight_id for o in top if o.stops == 0}
+
     lines = [
         f"Tìm thấy {len(offers)} chuyến bay từ {origin_label} → {dest_label} "
         f"ngày {departure_date} (hạng {cabin_class}, {passengers} HK):\n"
     ]
-    for i, f in enumerate(offers[:5], 1):
+    for i, f in enumerate(top, 1):
         if f.stops == 0:
             stops_label = "Bay thẳng"
         elif f.stop_cities:
@@ -196,8 +291,20 @@ def search_flights(
             if f.seats_available is not None
             else "Không có dữ liệu số ghế"
         )
+
+        tags = []
+        if f.flight_id == cheapest_id:
+            tags.append("Rẻ nhất")
+        if f.flight_id == fastest_id:
+            tags.append("Nhanh nhất")
+        if f.flight_id in direct_ids:
+            tags.append("Bay thẳng")
+        if preferred_airline and preferred_airline.lower() in f.airline.lower():
+            tags.append("Hãng ưa thích")
+        tag_str = f" [{', '.join(tags)}]" if tags else ""
+
         lines.append(
-            f"{i}. [{f.flight_id}] {f.airline} {f.flight_number}\n"
+            f"{i}. [{f.flight_id}] {f.airline} {f.flight_number}{tag_str}\n"
             f"   ✈ {f.departure_time} → {f.arrival_time} ({f.duration_minutes//60}h{f.duration_minutes%60:02d}m, {stops_label})\n"
             f"   💺 {f.cabin_class} | 🧳 {baggage_label} | {meal_label}\n"
             f"   💰 ${f.price_usd:,.2f} (~{f.price_vnd:,}đ) | {seats_label}\n"
@@ -284,16 +391,117 @@ def recall_preferences(query: str) -> str:
     )
 
 
+@tool
+def track_flight(
+    origin: str,
+    destination: str,
+    departure_date: str,
+    current_price_usd: float,
+    passengers: int = 1,
+    cabin_class: str = "ECONOMY",
+    flight_number: str = "",
+    airline: str = "",
+    chat_id: str = "",
+) -> str:
+    """Start tracking the price of a flight route and notify the user on changes.
+
+    Call this when the user asks to watch/monitor a flight for price changes.
+    The user will receive a Zalo notification whenever the price changes significantly.
+
+    Args:
+        origin: Departure airport IATA code (e.g. "HAN").
+        destination: Arrival airport IATA code (e.g. "SGN").
+        departure_date: Date in YYYY-MM-DD format.
+        current_price_usd: Current cheapest price in USD (use price from search_flights).
+        passengers: Number of passengers (default 1).
+        cabin_class: ECONOMY/PREMIUM_ECONOMY/BUSINESS/FIRST (default ECONOMY).
+        flight_number: Specific flight number to track (optional, used for display).
+        airline: Airline name (optional, used for display).
+        chat_id: Zalo chat_id for notifications. Leave empty to auto-detect from session.
+    """
+    user_id = _get_actor_id()
+    # Derive chat_id from session when not explicitly passed
+    if not chat_id:
+        config = get_config()
+        thread_id = config["configurable"].get("thread_id", "")
+        # Zalo sessions are formatted as "zalo:<chat_id>"
+        if thread_id.startswith("zalo:"):
+            chat_id = thread_id[len("zalo:"):]
+        else:
+            chat_id = user_id
+
+    entry = flight_tracker.add(
+        user_id=user_id,
+        chat_id=chat_id,
+        origin=origin,
+        destination=destination,
+        departure_date=departure_date,
+        passengers=passengers,
+        cabin_class=cabin_class,
+        last_price_usd=current_price_usd,
+        flight_number=flight_number,
+        airline=airline,
+    )
+    return (
+        f"✅ Đã bắt đầu theo dõi:\n"
+        f"  ✈ {origin} → {destination} | {departure_date} | {cabin_class}\n"
+        f"  💰 Giá hiện tại: ${current_price_usd:,.2f}\n"
+        f"  🔔 Bạn sẽ nhận thông báo qua Zalo khi giá thay đổi hơn $5.\n"
+        f"  _(Mã theo dõi: {entry.tracking_id} — dùng mã này để huỷ theo dõi)_"
+    )
+
+
+@tool
+def untrack_flight(tracking_id: str) -> str:
+    """Stop tracking a flight by its tracking ID.
+
+    Args:
+        tracking_id: The tracking ID returned by track_flight (e.g. "a1b2c3d4").
+    """
+    removed = flight_tracker.remove(tracking_id)
+    if removed:
+        return f"✅ Đã huỷ theo dõi chuyến bay (mã: {tracking_id})."
+    return f"Không tìm thấy chuyến bay với mã theo dõi '{tracking_id}'."
+
+
+@tool
+def list_tracked_flights() -> str:
+    """List all flights currently being tracked for the current user.
+
+    Returns a formatted list with tracking IDs, routes, dates, and last known prices.
+    """
+    user_id = _get_actor_id()
+    entries = flight_tracker.list_for_user(user_id)
+    if not entries:
+        return "Bạn chưa theo dõi chuyến bay nào. Hãy dùng track_flight để bắt đầu."
+
+    lines = [f"Danh sách chuyến bay đang theo dõi ({len(entries)} chuyến):\n"]
+    for e in entries:
+        last_checked = e.last_checked_at or "Chưa kiểm tra"
+        flight_label = f"{e.airline} {e.flight_number}".strip() or "Bất kỳ hãng nào"
+        lines.append(
+            f"• [{e.tracking_id}] {flight_label}\n"
+            f"  ✈ {e.origin} → {e.destination} | {e.departure_date} | {e.cabin_class}\n"
+            f"  💰 Giá cuối: ${e.last_price_usd:,.2f} (~{int(e.last_price_usd*25000):,}đ)\n"
+            f"  🕐 Kiểm tra lần cuối: {last_checked}\n"
+        )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # LangGraph Definition
 # ---------------------------------------------------------------------------
 
 ALL_TOOLS = [
+    validate_flight_request,
     search_flights,
     get_flight_details,
     list_supported_airports,
     remember_preference,
     recall_preferences,
+    track_flight,
+    untrack_flight,
+    list_tracked_flights,
 ]
 
 llm_with_tools = llm.bind_tools(ALL_TOOLS)
@@ -410,6 +618,44 @@ zalo_webhook_handler = ZaloWebhookHandler(
     bot_client=zalo_bot_client,
 )
 app.add_route("/webhooks/zalo", zalo_webhook_handler.handle, methods=["POST"])
+
+
+# ---------------------------------------------------------------------------
+# Price-alert check endpoint (call via scheduler / cron)
+# ---------------------------------------------------------------------------
+
+PRICE_ALERT_SECRET = os.environ.get("PRICE_ALERT_SECRET", "")
+
+
+async def _check_price_alerts_handler(request):
+    """POST /check-price-alerts — trigger a price check for all tracked flights.
+
+    Protected by PRICE_ALERT_SECRET header (X-Alert-Secret) when the env var is set.
+    Intended to be called by an external scheduler (e.g. every 30 min).
+    """
+    from starlette.responses import JSONResponse as _JSONResponse
+
+    if PRICE_ALERT_SECRET:
+        received = request.headers.get("X-Alert-Secret", "")
+        if not hmac.compare_digest(received, PRICE_ALERT_SECRET):
+            return _JSONResponse({"ok": False, "error": "Unauthorized."}, status_code=403)
+
+    changes = await flight_tracker.check_all_and_notify(
+        flight_provider=flight_provider,
+        bot_client=zalo_bot_client,
+    )
+    return _JSONResponse(
+        {
+            "ok": True,
+            "checked": len(flight_tracker.all()),
+            "changes": len(changes),
+            "details": changes,
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
+
+
+app.add_route("/check-price-alerts", _check_price_alerts_handler, methods=["POST"])
 
 
 if __name__ == "__main__":

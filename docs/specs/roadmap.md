@@ -4,23 +4,20 @@
 
 - [x] Scaffold dự án (LangGraph + Memory)
 - [x] Implement flight search tools (mock + SerpAPI Google Flights)
-- [ ] Multi-turn conversation: hỏi thêm thông tin còn thiếu
-- [ ] Gợi ý top 3–5 chuyến bay với giải thích
-- [ ] Nhớ sở thích người dùng qua long-term memory
+- [x] Multi-turn conversation: hỏi thêm thông tin còn thiếu (`validate_flight_request` tool + slot-filling flow)
+- [x] Gợi ý top 3–5 chuyến bay với giải thích (tag Rẻ nhất / Nhanh nhất / Bay thẳng / Hãng ưa thích)
+- [x] Nhớ sở thích người dùng qua long-term memory (`remember_preference` + `recall_preferences`)
 
 ## Next
 
-- [ ] Tích hợp thêm nguồn dữ liệu (Skyscanner, Google Flights)
-- [ ] Filter nâng cao: số điểm dừng, thời gian bay, hãng bay ưa thích
+- [x] Filter nâng cao: số điểm dừng (`max_stops`), thời gian bay (`earliest/latest_departure`), hãng bay ưa thích (`preferred_airline`)
 - [ ] Hỗ trợ tìm kiếm nhiều chặng (multi-city)
 - [ ] Thông báo giá giảm cho tuyến bay yêu thích
 
-## Later
-
-- [ ] Đặt vé trực tiếp qua API (với xác thực người dùng)
-- [ ] Tích hợp loyalty programs (Bông Sen Vàng, SkyMiles)
-- [ ] Dashboard analytics cho admin
-
 ## Done
 
-_(Chưa có)_
+- Scaffold LangGraph + GreenNode AgentBase
+- Flight search: MockFlightProvider + SerpApiFlightProvider
+- Zalo Bot webhook integration
+- Long-term memory (MemoryClient) + short-term (checkpointer)
+- Unit tests: flight providers, Zalo webhook handler

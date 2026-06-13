@@ -12,6 +12,7 @@ Agent hiểu yêu cầu bằng tiếng Việt và tiếng Anh, tìm kiếm và g
 - **Gợi ý thông minh**: Top 3–5 chuyến bay kèm giải thích tại sao phù hợp
 - **Hỗ trợ khứ hồi** và một chiều
 - **Nhớ sở thích**: lưu hãng bay ưa thích, hạng ghế, nhu cầu hành lý
+- **Theo dõi giá vé**: theo dõi một chuyến bay và nhận thông báo Zalo khi giá thay đổi
 - **Đa ngôn ngữ**: tự động phát hiện tiếng Việt / tiếng Anh
 - **Dữ liệu Google Flights qua SerpAPI**: hỗ trợ chuyến bay thật, một chiều và khứ hồi
 - **Mock provider**: chạy test không cần API key
@@ -244,7 +245,8 @@ flight-finder-agent/
 ├── main.py                         # Agent entrypoint (LangGraph graph + handler)
 ├── tools/
 │   ├── __init__.py
-│   └── flight_providers.py         # SerpAPI + Mock providers
+│   ├── flight_providers.py         # SerpAPI + Mock providers
+│   └── flight_tracker.py           # Theo dõi giá vé + thông báo
 ├── integrations/
 │   ├── __init__.py
 │   └── zalo_bot.py                 # Zalo webhook + sendMessage client
@@ -298,13 +300,53 @@ Dùng skill `/agentbase-memory` để tạo memory store:
 
 ## Tools có sẵn
 
-| Tool                      | Mô tả                                                          |
-| ------------------------- | -------------------------------------------------------------- |
-| `search_flights`          | Tìm chuyến bay theo origin, destination, ngày, hạng, ngân sách |
-| `get_flight_details`      | Lấy chi tiết máy bay, tiện nghi, chính sách hủy vé             |
-| `list_supported_airports` | Danh sách sân bay được hỗ trợ                                  |
-| `remember_preference`     | Lưu sở thích người dùng vào long-term memory                   |
-| `recall_preferences`      | Truy xuất sở thích đã lưu để cá nhân hóa kết quả               |
+| Tool                      | Mô tả                                                           |
+| ------------------------- | --------------------------------------------------------------- |
+| `search_flights`          | Tìm chuyến bay theo origin, destination, ngày, hạng, ngân sách  |
+| `get_flight_details`      | Lấy chi tiết máy bay, tiện nghi, chính sách hủy vé              |
+| `list_supported_airports` | Danh sách sân bay được hỗ trợ                                   |
+| `remember_preference`     | Lưu sở thích người dùng vào long-term memory                    |
+| `recall_preferences`      | Truy xuất sở thích đã lưu để cá nhân hóa kết quả                |
+| `track_flight`            | Bắt đầu theo dõi giá của một chuyến bay                         |
+| `untrack_flight`          | Huỷ theo dõi theo tracking ID                                   |
+| `list_tracked_flights`    | Xem danh sách chuyến bay đang theo dõi kèm giá cuối             |
+
+---
+
+## Theo dõi giá vé
+
+Người dùng có thể yêu cầu agent theo dõi một chuyến bay sau khi tìm kiếm:
+
+> _"Theo dõi chuyến Vietnam Airlines rẻ nhất đó cho tôi"_
+
+Agent gọi `track_flight`, lưu giá hiện tại làm baseline. Khi có thay đổi giá (mặc định ≥ $5), người dùng nhận thông báo qua Zalo:
+
+```
+📉 Cập nhật giá vé!
+
+✈ Vietnam Airlines VN123 — HAN → SGN
+📅 Ngày bay: 2026-07-20
+💰 Giá giảm: $85.00 (~2,125,000đ) → $62.00 (~1,550,000đ) (−23.00 USD)
+```
+
+### Kích hoạt kiểm tra giá định kỳ
+
+Gọi endpoint sau từ một scheduler (cron job, Task Scheduler, v.v.) để kiểm tra toàn bộ danh sách đang theo dõi:
+
+```bash
+curl -X POST https://<endpoint-url>/check-price-alerts \
+  -H "X-Alert-Secret: <PRICE_ALERT_SECRET>"
+```
+
+Response trả về số chuyến bay đã kiểm tra và danh sách thay đổi giá (nếu có).
+
+### Biến môi trường liên quan
+
+| Biến                        | Mặc định              | Mô tả                                              |
+| --------------------------- | --------------------- | -------------------------------------------------- |
+| `FLIGHT_TRACKER_FILE`       | `flight_tracker.json` | File JSON lưu danh sách chuyến bay đang theo dõi   |
+| `PRICE_CHANGE_THRESHOLD_USD`| `5.0`                 | Ngưỡng thay đổi tối thiểu (USD) để gửi thông báo  |
+| `PRICE_ALERT_SECRET`        | _(trống)_             | Secret để bảo vệ endpoint `/check-price-alerts`    |
 
 ---
 
