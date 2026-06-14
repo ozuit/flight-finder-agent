@@ -101,7 +101,7 @@ Quy trình xử lý:
 2. Gọi `validate_flight_request` với thông tin hiện có để xác định còn thiếu gì.
 3. Nếu thiếu thông tin, hỏi người dùng TỪNG cái một (ưu tiên: điểm đi → điểm đến → ngày → hành khách).
 4. Khi đủ thông tin, gọi `search_flights` (áp dụng sở thích đã lưu vào tham số).
-5. Trình bày kết quả: xếp hạng top 3–5, GIẢI THÍCH từng lựa chọn (rẻ nhất / nhanh nhất / bay thẳng / phù hợp sở thích...).
+5. Trình bày kết quả: xếp hạng top 3–5, GIẢI THÍCH từng lựa chọn (rẻ nhất / nhanh nhất / bay thẳng / phù hợp sở thích...). Mỗi chuyến bay đều có link 🔗 để đặt vé — nhắc người dùng click vào link đó để hoàn tất đặt vé.
 6. Khi người dùng muốn theo dõi một chuyến bay: gọi `track_flight` với thông tin chuyến bay đó.
    - Nếu người dùng đang chat qua Zalo, dùng `chat_id` từ session_id (bỏ tiền tố "zalo:").
    - Nếu không xác định được chat_id, dùng user_id làm chat_id.
@@ -310,11 +310,13 @@ def search_flights(
             tags.append("Hãng ưa thích")
         tag_str = f" [{', '.join(tags)}]" if tags else ""
 
+        booking_line = f"   🔗 Đặt vé: {f.booking_url}" if f.booking_url else ""
         lines.append(
             f"{i}. [{f.flight_id}] {f.airline} {f.flight_number}{tag_str}\n"
             f"   ✈ {f.departure_time} → {f.arrival_time} ({f.duration_minutes//60}h{f.duration_minutes%60:02d}m, {stops_label})\n"
             f"   💺 {f.cabin_class} | 🧳 {baggage_label} | {meal_label}\n"
             f"   💰 ${f.price_usd:,.2f} (~{f.price_vnd:,}đ) | {seats_label}\n"
+            + (booking_line + "\n" if booking_line else "")
         )
 
     return "\n".join(lines)

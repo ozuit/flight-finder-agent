@@ -30,6 +30,7 @@ class FlightOffer:
     seats_available: Optional[int]
     baggage_allowance_kg: Optional[int]
     meal_included: Optional[bool]
+    booking_url: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +50,7 @@ class FlightOffer:
             "seats_available": self.seats_available,
             "baggage_kg": self.baggage_allowance_kg,
             "meal_included": self.meal_included,
+            "booking_url": self.booking_url,
         }
 
 
@@ -127,6 +129,7 @@ MOCK_AIRLINES = [
     ("Japan Airlines", "JL"),
     ("Emirates", "EK"),
 ]
+
 
 
 def resolve_airport(name: str) -> Optional[str]:
@@ -217,6 +220,7 @@ class MockFlightProvider:
                     seats_available=random.randint(1, 30),
                     baggage_allowance_kg=23 if cabin_class.upper() == "ECONOMY" else 32,
                     meal_included=cabin_class.upper() != "ECONOMY" or random.random() > 0.5,
+                    booking_url="",
                 )
             )
 
@@ -335,6 +339,11 @@ class SerpApiFlightProvider:
                 ]
                 stop_cities = [city for city in stop_cities if city]
                 flight_id = self._flight_id(raw)
+                booking_token = raw.get("booking_token", "")
+                booking_url = (
+                    f"https://www.google.com/travel/flights/booking?tfs={booking_token}"
+                    if booking_token else ""
+                )
                 offer = FlightOffer(
                     flight_id=flight_id,
                     airline=" / ".join(airlines) or "Unknown airline",
@@ -353,6 +362,7 @@ class SerpApiFlightProvider:
                     seats_available=None,
                     baggage_allowance_kg=None,
                     meal_included=None,
+                    booking_url=booking_url,
                 )
                 offers.append(offer)
                 self._details[flight_id] = self._build_details(
