@@ -340,9 +340,7 @@ class SerpApiFlightProvider:
                 stop_cities = [city for city in stop_cities if city]
                 flight_id = self._flight_id(raw)
                 booking_token = raw.get("booking_token", "") or raw.get("departure_token", "")
-                if booking_token:
-                    booking_url = f"https://www.google.com/travel/flights/booking?tfs={booking_token}"
-                elif google_flights_url:
+                if google_flights_url:
                     booking_url = google_flights_url
                 else:
                     from urllib.parse import urlencode
