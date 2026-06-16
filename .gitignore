@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .env
 .greennode.json
+.greennode_runtime.json
+.vcr-credentials.json
 .agentbase/
 .agentbase-state.json
 *.credentials.json

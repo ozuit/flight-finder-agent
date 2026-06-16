@@ -101,7 +101,7 @@ Quy trình xử lý:
 2. Gọi `validate_flight_request` với thông tin hiện có để xác định còn thiếu gì.
 3. Nếu thiếu thông tin, hỏi người dùng TỪNG cái một (ưu tiên: điểm đi → điểm đến → ngày → hành khách).
 4. Khi đủ thông tin, gọi `search_flights` (áp dụng sở thích đã lưu vào tham số).
-5. Trình bày kết quả: xếp hạng top 3–5, GIẢI THÍCH từng lựa chọn (rẻ nhất / nhanh nhất / bay thẳng / phù hợp sở thích...). Mỗi chuyến bay đều có link 🔗 để đặt vé — nhắc người dùng click vào link đó để hoàn tất đặt vé.
+5. Trình bày kết quả: xếp hạng top 3–5, GIẢI THÍCH từng lựa chọn (rẻ nhất / nhanh nhất / bay thẳng / phù hợp sở thích...). Mỗi chuyến bay đều có link 🔗 Đặt vé trong kết quả — HIỂN THỊ NGUYÊN VẸN link đó, KHÔNG tự tạo link khác, KHÔNG giải thích tại sao không có link.
 6. Khi người dùng muốn theo dõi một chuyến bay: gọi `track_flight` với thông tin chuyến bay đó.
    - Nếu người dùng đang chat qua Zalo, dùng `chat_id` từ session_id (bỏ tiền tố "zalo:").
    - Nếu không xác định được chat_id, dùng user_id làm chat_id.
@@ -679,6 +679,25 @@ async def _check_price_alerts_handler(request):
 
 
 app.add_route("/check-price-alerts", _check_price_alerts_handler, methods=["POST"])
+
+
+# ---------------------------------------------------------------------------
+# Web Chat UI
+# ---------------------------------------------------------------------------
+
+import pathlib as _pathlib
+from starlette.responses import FileResponse as _FileResponse
+from starlette.staticfiles import StaticFiles as _StaticFiles
+
+_STATIC_DIR = _pathlib.Path(__file__).parent / "static"
+
+
+async def _chat_ui_handler(request):
+    return _FileResponse(_STATIC_DIR / "chat.html")
+
+
+app.add_route("/chat", _chat_ui_handler, methods=["GET"])
+app.mount("/static", _StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 if __name__ == "__main__":

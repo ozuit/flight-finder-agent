@@ -339,11 +339,16 @@ class SerpApiFlightProvider:
                 ]
                 stop_cities = [city for city in stop_cities if city]
                 flight_id = self._flight_id(raw)
-                booking_token = raw.get("booking_token", "")
-                booking_url = (
-                    f"https://www.google.com/travel/flights/booking?tfs={booking_token}"
-                    if booking_token else ""
-                )
+                booking_token = raw.get("booking_token", "") or raw.get("departure_token", "")
+                if booking_token:
+                    booking_url = f"https://www.google.com/travel/flights/booking?tfs={booking_token}"
+                elif google_flights_url:
+                    booking_url = google_flights_url
+                else:
+                    from urllib.parse import urlencode
+                    booking_url = "https://www.google.com/travel/flights?" + urlencode({
+                        "q": f"flights from {origin_code} to {dest_code} on {departure_date}"
+                    })
                 offer = FlightOffer(
                     flight_id=flight_id,
                     airline=" / ".join(airlines) or "Unknown airline",
